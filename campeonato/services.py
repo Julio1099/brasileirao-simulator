@@ -2,41 +2,31 @@ import random
 from django.db import transaction
 from .models import Time, Partida, Classificacao
 
-def gerar_calendario():
-    Partida.objects.all().delete()
-    Classificacao.objects.all().delete()
+class GeradorDeCalendario:
+    def __init__(self, times):
+        self.times = times
+        self.n = len(times)
+        self.num_rodadas_turno = self.n - 1
+        self.times_rotacao = self.times[:]
+        self.ultimo_local = {time.id: None for time in times}
+        self.todas_partidas_objs = []
+        self.partidas_organizadas = {}
 
-    times = list(Time.objects.all())
-    if len(times) != 20:
-        raise ValueError("O campeonato deve ter exatamente 20 times cadastrados.")
-
-    random.shuffle(times)
-
-    n = len(times)
-    num_rodadas_turno = n - 1
-    partidas_por_rodada = {i: [] for i in range(1, (num_rodadas_turno * 2) + 1)}
-    ultimo_local = {time.id: None for time in times}
-
-    times_rotacao = times[:]
-    
-    todas_partidas_objs = []
-
-    for rodada_num in range(1, num_rodadas_turno + 1):
+    def _gerar_pares_e_locais(self, rodada_num):
+        metade = self.n // 2
         pares_rodada = []
-        metade = n // 2
-        pares_rodada.append((times_rotacao[0], times_rotacao[-1]))
+        pares_rodada.append((self.times_rotacao[0], self.times_rotacao[-1]))
         for i in range(1, metade):
-            pares_rodada.append((times_rotacao[i], times_rotacao[n - 1 - i]))
+            pares_rodada.append((self.times_rotacao[i], self.times_rotacao[self.n - 1 - i]))
 
-        jogos_rodada_atual_turno = []
-        rodada_returno_num = rodada_num + num_rodadas_turno
-        jogos_rodada_atual_returno = []
+        rodada_returno_num = rodada_num + self.num_rodadas_turno
 
-        for t1, t2 in pares_rodada:
-            t1_pode_casa = ultimo_local[t1.id] != 'home'
-            t2_pode_fora = ultimo_local[t2.id] != 'away'
-            t2_pode_casa = ultimo_local[t2.id] != 'home'
-            t1_pode_fora = ultimo_local[t1.id] != 'away'
+        for idx_par, (t1, t2) in enumerate(pares_rodada):
+            
+            t1_pode_casa = self.ultimo_local[t1.id] != 'home'
+            t2_pode_fora = self.ultimo_local[t2.id] != 'away'
+            t2_pode_casa = self.ultimo_local[t2.id] != 'home'
+            t1_pode_fora = self.ultimo_local[t1.id] != 'away'
 
             mandante, visitante = None, None
 
@@ -45,62 +35,89 @@ def gerar_calendario():
             elif t2_pode_casa and t1_pode_fora:
                 mandante, visitante = t2, t1
             else:
-                idx_par = pares_rodada.index((t1,t2))
                 if (rodada_num + idx_par) % 2 == 0:
                     mandante, visitante = t1, t2
                 else:
                     mandante, visitante = t2, t1
 
             partida_turno = Partida(rodada=rodada_num, mandante=mandante, visitante=visitante)
-            todas_partidas_objs.append(partida_turno)
-            ultimo_local[mandante.id] = 'home'
-            ultimo_local[visitante.id] = 'away'
+            self.todas_partidas_objs.append(partida_turno)
+            
+            self.ultimo_local[mandante.id] = 'home'
+            self.ultimo_local[visitante.id] = 'away'
 
             partida_returno = Partida(rodada=rodada_returno_num, mandante=visitante, visitante=mandante)
-            todas_partidas_objs.append(partida_returno)
+            self.todas_partidas_objs.append(partida_returno)
 
+    def executar(self):
+        if self.n != 20:
+            raise ValueError("O campeonato deve ter exatamente 20 times cadastrados.")
 
-        times_rotacao.insert(1, times_rotacao.pop())
+        random.shuffle(self.times)
+        
+        for rodada_num in range(1, self.num_rodadas_turno + 1):
+            self._gerar_pares_e_locais(rodada_num)
+            
+            self.times_rotacao.insert(1, self.times_rotacao.pop())
+            
+        for p in self.todas_partidas_objs:
+            if p.rodada not in self.partidas_organizadas:
+                self.partidas_organizadas[p.rodada] = []
+            self.partidas_organizadas[p.rodada].append(p)
 
+        partidas_finais_para_salvar = []
+        for rodada_num in sorted(self.partidas_organizadas.keys()):
+            jogos_da_rodada = self.partidas_organizadas[rodada_num]
+            random.shuffle(jogos_da_rodada)
+            partidas_finais_para_salvar.extend(jogos_da_rodada)
+            
+        return partidas_finais_para_salvar, self.num_rodadas_turno * 2
 
-    partidas_organizadas = {}
-    for p in todas_partidas_objs:
-        if p.rodada not in partidas_organizadas:
-            partidas_organizadas[p.rodada] = []
-        partidas_organizadas[p.rodada].append(p)
+def gerar_calendario():
+    Partida.objects.all().delete()
+    Classificacao.objects.all().delete()
 
-    partidas_finais_para_salvar = []
-    for rodada_num in sorted(partidas_organizadas.keys()):
-        jogos_da_rodada = partidas_organizadas[rodada_num]
-        random.shuffle(jogos_da_rodada)
-        partidas_finais_para_salvar.extend(jogos_da_rodada)
+    times = list(Time.objects.all())
+
+    gerador = GeradorDeCalendario(times)
+    partidas_finais_para_salvar, total_rodadas = gerador.executar()
         
     Partida.objects.bulk_create(partidas_finais_para_salvar)
 
     print(
-        f"Calendário com {Partida.objects.count()} jogos em {num_rodadas_turno * 2} rodadas gerado."
+        f"Calendário com {Partida.objects.count()} jogos em {total_rodadas} rodadas gerado."
     )
 
+def _atualizar_estatisticas_classificacao(classificacao_obj, gols_marcados, gols_sofridos, cartoes_amarelos, cartoes_vermelhos):
+    classificacao_obj.gols_marcados += gols_marcados
+    classificacao_obj.gols_sofridos += gols_sofridos
 
-@transaction.atomic
-def calcular_classificacao_rodada(numero_rodada):
+    classificacao_obj.cartoes_amarelos += cartoes_amarelos
+    classificacao_obj.cartoes_vermelhos += cartoes_vermelhos
 
+    if gols_marcados > gols_sofridos:
+        classificacao_obj.pontos += 3
+        classificacao_obj.vitorias += 1
+    elif gols_marcados == gols_sofridos:
+        classificacao_obj.pontos += 1
+        classificacao_obj.empates += 1
+
+def _carregar_stats_base_rodada(numero_rodada):
     stats_base = {}
+    default_stats = {
+        "pontos": 0, "vitorias": 0, "empates": 0, "derrotas": 0,
+        "gols_marcados": 0, "gols_sofridos": 0, "saldo_gols": 0,
+        "cartoes_amarelos": 0, "cartoes_vermelhos": 0
+    }
+    
+    all_time_ids = Time.objects.values_list('id', flat=True)
+
     if numero_rodada == 1:
-        for time in Time.objects.all():
-            stats_base[time.id] = {
-                "pontos": 0, "vitorias": 0, "empates": 0, "derrotas": 0,
-                "gols_marcados": 0, "gols_sofridos": 0, "saldo_gols": 0,
-                "cartoes_amarelos": 0, "cartoes_vermelhos": 0
-            }
+        stats_base = {tid: default_stats.copy() for tid in all_time_ids}
     else:
+        stats_base = {tid: default_stats.copy() for tid in all_time_ids}
+        
         classificacao_anterior = Classificacao.objects.filter(rodada=numero_rodada - 1)
-        all_time_ids = Time.objects.values_list('id', flat=True)
-        stats_base = {tid: {
-                "pontos": 0, "vitorias": 0, "empates": 0, "derrotas": 0,
-                "gols_marcados": 0, "gols_sofridos": 0, "saldo_gols": 0,
-                "cartoes_amarelos": 0, "cartoes_vermelhos": 0
-            } for tid in all_time_ids}
 
         for c in classificacao_anterior:
             if c.time_id in stats_base:
@@ -109,6 +126,12 @@ def calcular_classificacao_rodada(numero_rodada):
                     "gols_marcados": c.gols_marcados, "gols_sofridos": c.gols_sofridos, "saldo_gols": c.saldo_gols,
                     "cartoes_amarelos": c.cartoes_amarelos, "cartoes_vermelhos": c.cartoes_vermelhos
                 }
+    return stats_base
+
+@transaction.atomic
+def calcular_classificacao_rodada(numero_rodada):
+
+    stats_base = _carregar_stats_base_rodada(numero_rodada)
 
     class_rodada_map = {}
     for time_id, stats in stats_base.items():
@@ -132,43 +155,40 @@ def calcular_classificacao_rodada(numero_rodada):
             continue
 
         if partida.mandante_id not in class_rodada_map or partida.visitante_id not in class_rodada_map:
-             print(f"Alerta: Time da partida ID {partida.id} não encontrado no mapa de classificação da rodada {numero_rodada}.")
-             continue
+              print(f"Alerta: Time da partida ID {partida.id} não encontrado no mapa de classificação da rodada {numero_rodada}.")
+              continue
 
         class_mandante = class_rodada_map[partida.mandante_id]
         class_visitante = class_rodada_map[partida.visitante_id]
 
+        _atualizar_estatisticas_classificacao(
+            classificacao_obj=class_mandante,
+            gols_marcados=partida.gols_mandante,
+            gols_sofridos=partida.gols_visitante,
+            cartoes_amarelos=partida.cartoes_amarelos_mandante,
+            cartoes_vermelhos=partida.cartoes_vermelhos_mandante
+        )
 
-        class_mandante.gols_marcados += partida.gols_mandante
-        class_mandante.gols_sofridos += partida.gols_visitante
-        class_visitante.gols_marcados += partida.gols_visitante
-        class_visitante.gols_sofridos += partida.gols_mandante
-
-        class_mandante.cartoes_amarelos += partida.cartoes_amarelos_mandante
-        class_mandante.cartoes_vermelhos += partida.cartoes_vermelhos_mandante
-        class_visitante.cartoes_amarelos += partida.cartoes_amarelos_visitante
-        class_visitante.cartoes_vermelhos += partida.cartoes_vermelhos_visitante
+        _atualizar_estatisticas_classificacao(
+            classificacao_obj=class_visitante,
+            gols_marcados=partida.gols_visitante,
+            gols_sofridos=partida.gols_mandante,
+            cartoes_amarelos=partida.cartoes_amarelos_visitante,
+            cartoes_vermelhos=partida.cartoes_vermelhos_visitante
+        )
 
         if partida.gols_mandante > partida.gols_visitante:
-            class_mandante.pontos += 3
-            class_mandante.vitorias += 1
             class_visitante.derrotas += 1
         elif partida.gols_visitante > partida.gols_mandante:
-            class_visitante.pontos += 3
-            class_visitante.vitorias += 1
             class_mandante.derrotas += 1
-        else:
-            class_mandante.pontos += 1
-            class_visitante.pontos += 1
-            class_mandante.empates += 1
-            class_visitante.empates += 1
+
 
     objetos_para_atualizar = []
     campos_para_atualizar = [
-                "pontos", "vitorias", "empates", "derrotas",
-                "gols_marcados", "gols_sofridos", "saldo_gols",
-                "cartoes_amarelos", "cartoes_vermelhos"
-            ]
+                 "pontos", "vitorias", "empates", "derrotas",
+                 "gols_marcados", "gols_sofridos", "saldo_gols",
+                 "cartoes_amarelos", "cartoes_vermelhos"
+             ]
 
     for class_obj in class_rodada_map.values():
         class_obj.saldo_gols = class_obj.gols_marcados - class_obj.gols_sofridos
