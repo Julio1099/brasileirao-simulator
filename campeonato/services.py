@@ -73,20 +73,24 @@ class GeradorDeCalendario:
             
         return partidas_finais_para_salvar, self.num_rodadas_turno * 2
 
-def gerar_calendario():
-    Partida.objects.all().delete()
-    Classificacao.objects.all().delete()
+class GeradorDeCalendarioService:
+    def __init__(self):
+        pass
 
-    times = list(Time.objects.all())
+    def executar(self):
+        Partida.objects.all().delete()
+        Classificacao.objects.all().delete()
 
-    gerador = GeradorDeCalendario(times)
-    partidas_finais_para_salvar, total_rodadas = gerador.executar()
-        
-    Partida.objects.bulk_create(partidas_finais_para_salvar)
+        times = list(Time.objects.all())
 
-    print(
-        f"Calendário com {Partida.objects.count()} jogos em {total_rodadas} rodadas gerado."
-    )
+        gerador = GeradorDeCalendario(times)
+        partidas_finais_para_salvar, total_rodadas = gerador.executar()
+            
+        Partida.objects.bulk_create(partidas_finais_para_salvar)
+
+        print(
+            f"Calendário com {Partida.objects.count()} jogos em {total_rodadas} rodadas gerado."
+        )
 
 def _atualizar_estatisticas_classificacao(classificacao_obj, gols_marcados, gols_sofridos, cartoes_amarelos, cartoes_vermelhos):
     classificacao_obj.gols_marcados += gols_marcados

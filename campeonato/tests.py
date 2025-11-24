@@ -1,6 +1,6 @@
 from django.test import TestCase
 from .models import Time, Partida, Classificacao
-from .services import gerar_calendario, calcular_classificacao_rodada
+from .services import GeradorDeCalendarioService, calcular_classificacao_rodada
 
 
 class RequisitosCampeonatoTests(TestCase):
@@ -17,7 +17,7 @@ class RequisitosCampeonatoTests(TestCase):
         for i in range(20):
             Time.objects.create(nome=f"Time Teste {i}")
 
-        gerar_calendario()
+        GeradorDeCalendarioService().executar()
 
         total_times = Time.objects.count()
         total_partidas = Partida.objects.count()
