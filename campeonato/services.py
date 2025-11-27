@@ -1,138 +1,214 @@
 import random
-from django.core.management.base import BaseCommand
-from campeonato.models import Time, Partida, Classificacao
-from campeonato.services import GeradorDeCalendarioService, calcular_classificacao_rodada
+from django.db import transaction
+from .models import Time, Partida, Classificacao
 
-LISTA_TIMES = [
-    "Atlético Mineiro", "Bahia", "Bragantino", "Botafogo", "Ceará",
-    "Corinthians", "Cruzeiro", "Flamengo", "Fluminense", "Fortaleza",
-    "Grêmio", "Internacional", "Juventude", "Mirassol", "Palmeiras",
-    "Santos", "São Paulo", "Sport", "Vasco da Gama", "Vitória",
-]
+class GeradorDeCalendario:
+    def __init__(self, times):
+        self.times = times
+        self.n = len(times)
+        self.num_rodadas_turno = self.n - 1
+        self.times_rotacao = self.times[:]
+        self.ultimo_local = {time.id: None for time in times}
+        self.todas_partidas_objs = []
+        self.partidas_organizadas = {}
 
-LARGURA_NOME_TIME = max(len(nome) for nome in LISTA_TIMES) + 1
+    def _gerar_pares_e_locais(self, rodada_num):
+        metade = self.n // 2
+        pares_rodada = []
+        pares_rodada.append((self.times_rotacao[0], self.times_rotacao[-1]))
+        for i in range(1, metade):
+            pares_rodada.append((self.times_rotacao[i], self.times_rotacao[self.n - 1 - i]))
 
+        rodada_returno_num = rodada_num + self.num_rodadas_turno
 
-class Command(BaseCommand):
-    help = "Simula a temporada completa do Campeonato Brasileiro 2025."
+        for idx_par, (t1, t2) in enumerate(pares_rodada):
+            
+            t1_pode_casa = self.ultimo_local[t1.id] != 'home'
+            t2_pode_fora = self.ultimo_local[t2.id] != 'away'
+            t2_pode_casa = self.ultimo_local[t2.id] != 'home'
+            t1_pode_fora = self.ultimo_local[t1.id] != 'away'
 
-    def handle(self, *args, **options):
-        self.stdout.write(
-            self.style.SUCCESS("--- Iniciando Simulação do Brasileirão 2025 ---")
-        )
+            mandante, visitante = None, None
 
-        self.stdout.write("Limpando dados da temporada anterior...")
+            if t1_pode_casa and t2_pode_fora:
+                mandante, visitante = t1, t2
+            elif t2_pode_casa and t1_pode_fora:
+                mandante, visitante = t2, t1
+            else:
+                if (rodada_num + idx_par) % 2 == 0:
+                    mandante, visitante = t1, t2
+                else:
+                    mandante, visitante = t2, t1
+
+            partida_turno = Partida(rodada=rodada_num, mandante=mandante, visitante=visitante)
+            self.todas_partidas_objs.append(partida_turno)
+            
+            self.ultimo_local[mandante.id] = 'home'
+            self.ultimo_local[visitante.id] = 'away'
+
+            partida_returno = Partida(rodada=rodada_returno_num, mandante=visitante, visitante=mandante)
+            self.todas_partidas_objs.append(partida_returno)
+
+    def executar(self):
+        if self.n != 20:
+            raise ValueError("O campeonato deve ter exatamente 20 times cadastrados.")
+
+        random.shuffle(self.times)
+        
+        for rodada_num in range(1, self.num_rodadas_turno + 1):
+            self._gerar_pares_e_locais(rodada_num)
+            
+            self.times_rotacao.insert(1, self.times_rotacao.pop())
+            
+        for p in self.todas_partidas_objs:
+            if p.rodada not in self.partidas_organizadas:
+                self.partidas_organizadas[p.rodada] = []
+            self.partidas_organizadas[p.rodada].append(p)
+
+        partidas_finais_para_salvar = []
+        for rodada_num in sorted(self.partidas_organizadas.keys()):
+            jogos_da_rodada = self.partidas_organizadas[rodada_num]
+            random.shuffle(jogos_da_rodada)
+            partidas_finais_para_salvar.extend(jogos_da_rodada)
+            
+        return partidas_finais_para_salvar, self.num_rodadas_turno * 2
+
+class GeradorDeCalendarioService:
+    def __init__(self):
+        pass
+
+    def executar(self):
         Partida.objects.all().delete()
         Classificacao.objects.all().delete()
-        Time.objects.all().delete()
 
-        self.stdout.write(f"Criando os 20 times da Série A 2025...")
-        for nome_time in LISTA_TIMES:
-            Time.objects.get_or_create(nome=nome_time)
-        self.stdout.write(f"{Time.objects.count()} times criados com sucesso.")
+        times = list(Time.objects.all())
 
-        self.stdout.write("Gerando calendário (Requisitos 1 e 2)...")
-        try:
-            GeradorDeCalendarioService().executar()
-        except ValueError as e:
-            self.stderr.write(self.style.ERROR(f"Erro ao gerar calendário: {e}"))
-            return
+        gerador = GeradorDeCalendario(times)
+        partidas_finais_para_salvar, total_rodadas = gerador.executar()
+            
+        Partida.objects.bulk_create(partidas_finais_para_salvar)
 
-        self.stdout.write(f"Calendário com {Partida.objects.count()} jogos gerado.")
+        print(
+            f"Calendário com {Partida.objects.count()} jogos em {total_rodadas} rodadas gerado."
+        )
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                "\n--- IMPRIMINDO CALENDÁRIO GERADO (Verificação Reqs. 1 e 2) ---"
+class ClassificacaoProcessor:
+    
+    DEFAULT_STATS = {
+        "pontos": 0, "vitorias": 0, "empates": 0, "derrotas": 0,
+        "gols_marcados": 0, "gols_sofridos": 0, "saldo_gols": 0,
+        "cartoes_amarelos": 0, "cartoes_vermelhos": 0
+    }
+
+    def __init__(self, numero_rodada):
+        self.numero_rodada = numero_rodada
+        self.class_rodada_map = {}
+        self.objetos_para_atualizar = []
+        self._carregar_stats_base()
+        self._processar_partidas()
+        self._finalizar_e_salvar()
+
+    def _carregar_stats_base(self):
+        stats_base = {}
+        all_time_ids = Time.objects.values_list('id', flat=True)
+
+        if self.numero_rodada == 1:
+            stats_base = {tid: self.DEFAULT_STATS.copy() for tid in all_time_ids}
+        else:
+            stats_base = {tid: self.DEFAULT_STATS.copy() for tid in all_time_ids}
+            
+            classificacao_anterior = Classificacao.objects.filter(rodada=self.numero_rodada - 1)
+
+            for c in classificacao_anterior:
+                if c.time_id in stats_base:
+                    stats_base[c.time_id] = {
+                        "pontos": c.pontos, "vitorias": c.vitorias, "empates": c.empates, "derrotas": c.derrotas,
+                        "gols_marcados": c.gols_marcados, "gols_sofridos": c.gols_sofridos, "saldo_gols": c.saldo_gols,
+                        "cartoes_amarelos": c.cartoes_amarelos, "cartoes_vermelhos": c.cartoes_vermelhos
+                    }
+        
+        for time_id, stats in stats_base.items():
+            obj, created = Classificacao.objects.get_or_create(
+                time_id=time_id,
+                rodada=self.numero_rodada,
+                defaults=stats
             )
+            if not created:
+                for key, value in stats.items():
+                    setattr(obj, key, value)
+            self.class_rodada_map[time_id] = obj
+
+
+    def _atualizar_estatisticas(self, classificacao_obj, gols_marcados, gols_sofridos, cartoes_amarelos, cartoes_vermelhos):
+        classificacao_obj.gols_marcados += gols_marcados
+        classificacao_obj.gols_sofridos += gols_sofridos
+
+        classificacao_obj.cartoes_amarelos += cartoes_amarelos
+        classificacao_obj.cartoes_vermelhos += cartoes_vermelhos
+
+        if gols_marcados > gols_sofridos:
+            classificacao_obj.pontos += 3
+            classificacao_obj.vitorias += 1
+        elif gols_marcados == gols_sofridos:
+            classificacao_obj.pontos += 1
+            classificacao_obj.empates += 1
+
+
+    def _processar_partidas(self):
+        partidas_da_rodada = Partida.objects.filter(rodada=self.numero_rodada).select_related(
+            "mandante", "visitante"
         )
-        try:
-            numeros_rodadas = (
-                Partida.objects.values_list("rodada", flat=True)
-                .distinct()
-                .order_by("rodada")
+        
+        for partida in partidas_da_rodada:
+            if partida.gols_mandante is None or partida.gols_visitante is None:
+                continue
+
+            if partida.mandante_id not in self.class_rodada_map or partida.visitante_id not in self.class_rodada_map:
+                print(f"Alerta: Time da partida ID {partida.id} não encontrado no mapa de classificação da rodada {self.numero_rodada}.")
+                continue
+
+            class_mandante = self.class_rodada_map[partida.mandante_id]
+            class_visitante = self.class_rodada_map[partida.visitante_id]
+
+            self._atualizar_estatisticas(
+                classificacao_obj=class_mandante,
+                gols_marcados=partida.gols_mandante,
+                gols_sofridos=partida.gols_visitante,
+                cartoes_amarelos=partida.cartoes_amarelos_mandante,
+                cartoes_vermelhos=partida.cartoes_vermelhos_mandante
             )
-            if not numeros_rodadas:
-                self.stdout.write(self.style.ERROR("Nenhum jogo foi gerado."))
-            for rodada_num in numeros_rodadas:
-                self.stdout.write(f"\n--- Rodada {rodada_num} ---")
-                partidas_da_rodada = Partida.objects.filter(
-                    rodada=rodada_num
-                ).order_by("id")
-                for partida in partidas_da_rodada:
-                    mandante_nome = partida.mandante.nome.ljust(LARGURA_NOME_TIME)
-                    vs = " vs ".center(9)
-                    visitante_nome = partida.visitante.nome
-                    self.stdout.write(f"  {mandante_nome}{vs}{visitante_nome}")
-        except AttributeError:
-            self.stderr.write(self.style.ERROR("Erro ao imprimir calendário."))
-        except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Erro inesperado: {e}"))
-        self.stdout.write(
-            self.style.SUCCESS("\n--- FIM DA VERIFICAÇÃO DO CALENDÁRIO ---\n")
+
+            self._atualizar_estatisticas(
+                classificacao_obj=class_visitante,
+                gols_marcados=partida.gols_visitante,
+                gols_sofridos=partida.gols_mandante,
+                cartoes_amarelos=partida.cartoes_amarelos_visitante,
+                cartoes_vermelhos=partida.cartoes_vermelhos_visitante
+            )
+
+            if partida.gols_mandante > partida.gols_visitante:
+                class_visitante.derrotas += 1
+            elif partida.gols_visitante > partida.gols_mandante:
+                class_mandante.derrotas += 1
+        
+        self.objetos_para_atualizar = list(self.class_rodada_map.values())
+        
+    
+    def _finalizar_e_salvar(self):
+        campos_para_atualizar = [
+            "pontos", "vitorias", "empates", "derrotas",
+            "gols_marcados", "gols_sofridos", "saldo_gols",
+            "cartoes_amarelos", "cartoes_vermelhos"
+        ]
+
+        for class_obj in self.objetos_para_atualizar:
+            class_obj.saldo_gols = class_obj.gols_marcados - class_obj.gols_sofridos
+
+        Classificacao.objects.bulk_update(
+            self.objetos_para_atualizar,
+            campos_para_atualizar,
         )
 
-        self.stdout.write(
-            "Iniciando simulação das 38 rodadas (Requisitos 3, 4, 5)..."
-        )
-
-        for i in range(1, 39):
-            self.stdout.write(f"\n--- Processando Rodada {i} ---")
-            partidas_da_rodada = Partida.objects.filter(
-                rodada=i, gols_mandante__isnull=True
-            ).order_by("id")
-
-            for partida in partidas_da_rodada:
-                partida.gols_mandante = random.randint(0, 4)
-                partida.gols_visitante = random.randint(0, 4)
-
-                partida.cartoes_amarelos_mandante = random.randint(0, 5)
-                partida.cartoes_amarelos_visitante = random.randint(0, 5)
-                partida.cartoes_vermelhos_mandante = random.choice([0, 0, 0, 0, 1])
-                partida.cartoes_vermelhos_visitante = random.choice([0, 0, 0, 0, 1])
-
-                partida.save()
-
-                mandante_nome_str = partida.mandante.nome.ljust(LARGURA_NOME_TIME)
-                visitante_nome_str = partida.visitante.nome
-                placar_str = f" {partida.gols_mandante} x {partida.gols_visitante} ".center(9)
-
-                if partida.gols_mandante > partida.gols_visitante:
-                    mandante_nome = self.style.SUCCESS(mandante_nome_str)
-                    placar = self.style.SUCCESS(placar_str)
-                    visitante_nome = self.style.ERROR(visitante_nome_str)
-                elif partida.gols_visitante > partida.gols_mandante:
-                    mandante_nome = self.style.ERROR(mandante_nome_str)
-                    placar = self.style.ERROR(placar_str)
-                    visitante_nome = self.style.SUCCESS(visitante_nome_str)
-                else:
-                    mandante_nome = self.style.WARNING(mandante_nome_str)
-                    placar = self.style.WARNING(placar_str)
-                    visitante_nome = self.style.WARNING(visitante_nome_str)
-                self.stdout.write(f"  {mandante_nome}{placar}{visitante_nome}")
-
-            calcular_classificacao_rodada(numero_rodada=i)
-
-        self.stdout.write(self.style.SUCCESS("\n--- Simulação Concluída ---"))
-
-        self.stdout.write(self.style.SUCCESS("--- Classificação Final (Rodada 38) ---"))
-        nome_ljust = LARGURA_NOME_TIME
-        self.stdout.write(
-            "Pos | " + "Time".ljust(nome_ljust) + " | Pts | V   | SG   | GM  | CV | CA"
-        )
-        self.stdout.write(
-            "----|-" + "-" * nome_ljust + "-|-----|-----|------|-----|----|----"
-        )
-
-        tabela_final = Classificacao.objects.filter(rodada=38)
-
-        for i, classif in enumerate(tabela_final):
-            pos = f"{(i+1):>2}º".ljust(3)
-            nome = classif.time.nome.ljust(nome_ljust)
-            pts = str(classif.pontos).ljust(3)
-            v = str(classif.vitorias).ljust(3)
-            sg = str(classif.saldo_gols).ljust(4)
-            gm = str(classif.gols_marcados).ljust(3)
-            cv = str(classif.cartoes_vermelhos).ljust(2)
-            ca = str(classif.cartoes_amarelos).ljust(2)
-
-            self.stdout.write(f"{pos} | {nome} | {pts} | {v} | {sg} | {gm} | {cv} | {ca}")
+@transaction.atomic
+def calcular_classificacao_rodada(numero_rodada):
+    ClassificacaoProcessor(numero_rodada)
