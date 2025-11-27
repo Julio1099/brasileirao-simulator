@@ -1,7 +1,7 @@
 import random
 from django.core.management.base import BaseCommand
 from campeonato.models import Time, Partida, Classificacao
-from campeonato.services import gerar_calendario, calcular_classificacao_rodada
+from campeonato.services import GeradorDeCalendarioService, calcular_classificacao_rodada
 
 LISTA_TIMES = [
     "Atlético Mineiro", "Bahia", "Bragantino", "Botafogo", "Ceará",
@@ -33,7 +33,7 @@ class Command(BaseCommand):
 
         self.stdout.write("Gerando calendário (Requisitos 1 e 2)...")
         try:
-            gerar_calendario()
+            GeradorDeCalendarioService().executar()
         except ValueError as e:
             self.stderr.write(self.style.ERROR(f"Erro ao gerar calendário: {e}"))
             return
